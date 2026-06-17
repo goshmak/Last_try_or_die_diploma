@@ -35,10 +35,11 @@ _SUBJECTS: dict[str, str] = {
 # ---------------------------------------------------------------------------
 # ContentBuilder
 # ---------------------------------------------------------------------------
+
+# === ContentBuilder ===
+# Builds all content variants needed to send a notification.
 class ContentBuilder:
     """
-    Builds all content variants needed to send a notification.
-
     Falls back to inline defaults when template files are missing so the
     prototype runs correctly in a clean environment without pre-created
     template files (templates will still be rendered from the defaults
@@ -49,14 +50,11 @@ class ContentBuilder:
         TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
         self._ensure_default_templates()
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+
+    # === Public API ===
+    # Render all content for a given NotificationRequest
+    # Returns a dict with keys: subject, body_html, body_text, vk_text
     def build(self, request: NotificationRequest) -> dict[str, str]:
-        """
-        Render all content for a given NotificationRequest.
-        Returns a dict with keys: subject, body_html, body_text, vk_text.
-        """
         ctx = self._build_context(request)
         ntype = request.notification_type
 
@@ -72,11 +70,10 @@ class ContentBuilder:
             "vk_text": vk_text,
         }
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
+    
+    # === Internal helpers ===
+    # Flatten the request into a flat template context dictionary.
     def _build_context(self, request: NotificationRequest) -> dict:
-        """Flatten the request into a flat template context dictionary."""
         ctx: dict = {
             "assignment": request.assignment,
             "recipient_id": request.recipient_id,
@@ -108,8 +105,8 @@ class ContentBuilder:
             logger.error("Subject render error: %s", exc)
             return "Notification"
 
+    # Minimal inline fallback used when a template file is absent.
     def _fallback(self, template_name: str, ctx: dict) -> str:
-        """Minimal inline fallback used when a template file is absent."""
         assignment = ctx.get("assignment")
         student = ctx.get("student")
         teacher = ctx.get("teacher")
@@ -155,11 +152,10 @@ class ContentBuilder:
             )
         return "Notification from Humanitarian University."
 
-    # ------------------------------------------------------------------
-    # Default template files
-    # ------------------------------------------------------------------
+
+    # === Default template files ===
+    # Write default Jinja2 template files if they do not exist.
     def _ensure_default_templates(self) -> None:
-        """Write default Jinja2 template files if they do not exist."""
         defaults = _default_templates()
         for filename, content in defaults.items():
             path = TEMPLATES_DIR / filename
@@ -171,11 +167,10 @@ class ContentBuilder:
 # ---------------------------------------------------------------------------
 # Default template content
 # ---------------------------------------------------------------------------
+
+# Returns a mapping of template filename -> content.
+# These are written to the templates/ directory on first startup.
 def _default_templates() -> dict[str, str]:
-    """
-    Returns a mapping of template filename -> content.
-    These are written to the templates/ directory on first startup.
-    """
 
     base_html = """\
 <!DOCTYPE html>
@@ -210,7 +205,9 @@ def _default_templates() -> dict[str, str]:
 
     templates = {}
 
-    # ------------------------------------------------------------------ new_assignment
+    # ------------------------------------------------------------------
+    # new_assignment
+    # ------------------------------------------------------------------
     templates["new_assignment_email.html"] = (
         base_html
         + """\
@@ -251,7 +248,9 @@ Topic: {{ assignment.topic }}
 Please log in to the educational portal for details.
 """
 
-    # ------------------------------------------------------------------ deadline_student
+    # ------------------------------------------------------------------ 
+    # deadline_student
+    # ------------------------------------------------------------------
     templates["deadline_student_email.html"] = (
         base_html
         + """\
@@ -287,7 +286,9 @@ Reminder, {{ student.full_name }}! The deadline for "{{ assignment.title }}" is 
 Submit your work on time.
 """
 
-    # ------------------------------------------------------------------ deadline_teacher
+    # ------------------------------------------------------------------
+    # deadline_teacher
+    # ------------------------------------------------------------------
     templates["deadline_teacher_email.html"] = (
         base_html
         + """\
@@ -338,7 +339,9 @@ Submitted: {{ submission.submitted | join(", ") or "none" }}
 Not submitted: {{ submission.not_submitted | join(", ") or "all submitted" }}
 """
 
-    # ------------------------------------------------------------------ review_result
+    # ------------------------------------------------------------------
+    # review_result
+    # ------------------------------------------------------------------
     templates["review_result_email.html"] = (
         base_html
         + """\

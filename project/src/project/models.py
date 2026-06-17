@@ -17,7 +17,7 @@ from sqlalchemy.orm import DeclarativeBase
 
 
 # ---------------------------------------------------------------------------
-# Enumerations
+# Enums
 # ---------------------------------------------------------------------------
 
 # === The four notification types mandated by the technical specification. ===

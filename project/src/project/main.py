@@ -41,12 +41,11 @@ logger = logging.getLogger("notification_module.main")
 # ---------------------------------------------------------------------------
 # Lifespan manager: runs once on startup and shutdown
 # ---------------------------------------------------------------------------
+
+# Startup: initialize PostgreSQL/SQLite schema and verify Redis connection.
+# Shutdown: close Redis connection pool.
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Startup: initialize PostgreSQL/SQLite schema and verify Redis connection.
-    Shutdown: close Redis connection pool.
-    """
     logger.info("Starting up Notification Module...")
     await init_db()
     try:
@@ -73,24 +72,21 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-
 # ---------------------------------------------------------------------------
-# Endpoint: POST /notifications/send
+# Endpoints
 # ---------------------------------------------------------------------------
+# === POST /notifications/send ===
 @app.post(
     "/notifications/send",
     response_model=NotificationResponse,
     summary="Enqueue a notification for delivery",
     tags=["Notifications"],
 )
-async def send_notification(payload: NotificationRequest) -> NotificationResponse:
-    """
-    Accept a notification request, persist it as PENDING, and enqueue it
-    for asynchronous processing. Returns immediately with a task_id.
 
-    The worker (redis_queue.py worker loop) picks up the task and calls
-    send_notification.py to route it to the correct channel(s).
-    """
+# Accept a notification request, persist it as PENDING, and enqueue it for asynchronous processing.
+# Returns immediately with a task_id.
+# The worker (redis_queue.py worker loop) picks up the task and calls send_notification.py to route it to the correct channel(s).
+async def send_notification(payload: NotificationRequest) -> NotificationResponse:
     task_id = str(uuid.uuid4())
     logger.info(
         "Received send request | task_id=%s | type=%s | recipient=%s",
@@ -122,20 +118,17 @@ async def send_notification(payload: NotificationRequest) -> NotificationRespons
     )
 
 
-# ---------------------------------------------------------------------------
-# Endpoint: GET /notifications/status/{task_id}
-# ---------------------------------------------------------------------------
+# === GET /notifications/status/{task_id} ===
 @app.get(
     "/notifications/status/{task_id}",
     response_model=StatusResponse,
     summary="Check delivery status of a notification",
     tags=["Notifications"],
 )
+
+# Return the current delivery status for a given task_id.
+# Status values: PENDING, PROCESSING, SENT, FAILED.
 async def get_status(task_id: str) -> StatusResponse:
-    """
-    Return the current delivery status for a given task_id.
-    Status values: PENDING, PROCESSING, SENT, FAILED.
-    """
     async with get_db_session() as session:
         record = await session.get(NotificationRecord, task_id)
         if not record:
@@ -152,15 +145,16 @@ async def get_status(task_id: str) -> StatusResponse:
     )
 
 
-# ---------------------------------------------------------------------------
-# Endpoint: GET /notifications/history
-# ---------------------------------------------------------------------------
+# === GET /notifications/history ===
 @app.get(
     "/notifications/history",
     response_model=list[NotificationHistoryItem],
     summary="Retrieve notification history with optional filters",
     tags=["Notifications"],
 )
+
+# Retrieve notification history. Supports filtering by recipient, type, and delivery status.
+# Paginated with limit/offset.
 async def get_history(
     recipient_id: Optional[str] = Query(None, description="Filter by recipient ID"),
     notification_type: Optional[NotificationType] = Query(None, description="Filter by type"),
@@ -168,10 +162,6 @@ async def get_history(
     limit: int = Query(50, ge=1, le=500, description="Maximum records to return"),
     offset: int = Query(0, ge=0, description="Pagination offset"),
 ) -> list[NotificationHistoryItem]:
-    """
-    Retrieve notification history. Supports filtering by recipient, type, and
-    delivery status. Paginated with limit/offset.
-    """
     from sqlalchemy import select
 
     async with get_db_session() as session:
@@ -202,20 +192,17 @@ async def get_history(
     ]
 
 
-# ---------------------------------------------------------------------------
-# Endpoint: GET /notifications/settings/{recipient_id}
-# ---------------------------------------------------------------------------
+# === GET /notifications/settings/{recipient_id} ===
 @app.get(
     "/notifications/settings/{recipient_id}",
     response_model=SettingsResponse,
     summary="Retrieve notification preferences for a user",
     tags=["Settings"],
 )
+
+# Return the channel preferences stored for a given user.
+# If no settings exist, returns defaults (both channels enabled).
 async def get_settings(recipient_id: str) -> SettingsResponse:
-    """
-    Return the channel preferences stored for a given user.
-    If no settings exist, returns defaults (both channels enabled).
-    """
     from sqlalchemy import select
 
     async with get_db_session() as session:
@@ -242,21 +229,16 @@ async def get_settings(recipient_id: str) -> SettingsResponse:
         vk_user_id=settings.vk_user_id,
     )
 
-
-# ---------------------------------------------------------------------------
-# Endpoint: PUT /notifications/settings/{recipient_id}
-# ---------------------------------------------------------------------------
+# === PUT /notifications/settings/{recipient_id} ===
 @app.put(
     "/notifications/settings/{recipient_id}",
     response_model=SettingsResponse,
     summary="Update notification preferences for a user",
     tags=["Settings"],
 )
+
+#Create or update channel preferences for a user. Allows enabling/disabling email and VK independently and updating contact details.
 async def update_settings(recipient_id: str, payload: SettingsUpdate) -> SettingsResponse:
-    """
-    Create or update channel preferences for a user. Allows enabling/disabling
-    email and VK independently and updating contact details.
-    """
     from sqlalchemy import select
 
     async with get_db_session() as session:
@@ -292,15 +274,13 @@ async def update_settings(recipient_id: str, payload: SettingsUpdate) -> Setting
     )
 
 
-# ---------------------------------------------------------------------------
-# Endpoint: GET /health
-# ---------------------------------------------------------------------------
+# === GET /health ===
 @app.get("/health", summary="Health check", tags=["System"])
+
+# Lightweight liveness probe.
+# Checks Redis reachability.
+# Returns 200 if the service is operational.
 async def health_check():
-    """
-    Lightweight liveness probe. Checks Redis reachability.
-    Returns 200 if the service is operational.
-    """
     try:
         await redis_client.ping()
         redis_ok = True

@@ -13,12 +13,9 @@ logger = logging.getLogger("notification_module.send_notification")
 # ---------------------------------------------------------------------------
 # Email sender
 # ---------------------------------------------------------------------------
+
+# Sends notification emails via SMTP using aiosmtplib.
 class EmailSender:
-    """
-    Sends notification emails via SMTP using aiosmtplib.
-    Falls back to a log-only stub when SMTP credentials are not configured,
-    which keeps the prototype runnable without a real mail server.
-    """
 
     async def send(
         self, *, to_address: str, subject: str, body_html: str, body_text: str
@@ -74,16 +71,9 @@ class EmailSender:
 # ---------------------------------------------------------------------------
 # VK sender
 # ---------------------------------------------------------------------------
-class VKSender:
-    """
-    Sends messages via the VK Bots API (messages.send method).
-    Falls back to a log-only stub when VK credentials are not configured.
 
-    VK Bot messages require:
-    - A community token with the "messages" permission.
-    - "Allow messages from community" enabled for the user.
-    - random_id parameter (prevents duplicate messages).
-    """
+#Sends messages via the VK Bots API (messages.send method).
+class VKSender:
 
     VK_API_URL = "https://api.vk.com/method/messages.send"
 
@@ -128,14 +118,9 @@ class VKSender:
 # ---------------------------------------------------------------------------
 # API Gateway client (fetches user/assignment data when not in request)
 # ---------------------------------------------------------------------------
-class GatewayClient:
-    """
-    Lightweight HTTP client for querying the API Gateway.
 
-    The gateway exposes:
-      GET /users/{recipient_id}     -> full_name, email, vk_user_id, ...
-      GET /assignments/{id}         -> title, topic, deadline, ...
-    """
+# === Lightweight HTTP client for querying the API Gateway ===
+class GatewayClient:
 
     async def get_user(self, recipient_id: str) -> dict[str, Any]:
         url = f"{settings.API_GATEWAY_BASE_URL}/users/{recipient_id}"
@@ -171,10 +156,10 @@ class GatewayClient:
 # ---------------------------------------------------------------------------
 # Main router
 # ---------------------------------------------------------------------------
+
+# === Orchestrates content building and multi-channel delivery ===
 class NotificationRouter:
     """
-    Orchestrates content building and multi-channel delivery.
-
     Steps:
       1. Build subject + HTML + plain-text content via ContentBuilder.
       2. Resolve which channels to use.
@@ -187,11 +172,9 @@ class NotificationRouter:
         self.content_builder = ContentBuilder()
         self.gateway = GatewayClient()
 
+    # === Main entry point called by the queue worker ===
+    # Raises on unrecoverable errors; caller handles retry logic.
     async def route(self, *, task_id: str, request: NotificationRequest) -> None:
-        """
-        Main entry point called by the queue worker.
-        Raises on unrecoverable errors; caller handles retry logic.
-        """
         logger.info(
             "Routing | task_id=%s | type=%s | channel=%s",
             task_id,
@@ -199,17 +182,17 @@ class NotificationRouter:
             request.channel,
         )
 
-        # --- Build notification content ----------------------------------
+        # === Build notification content ===
         content = self.content_builder.build(request)
         subject: str = content["subject"]
         body_html: str = content["body_html"]
         body_text: str = content["body_text"]
         vk_text: str = content["vk_text"]
 
-        # --- Resolve channels -------------------------------------------
+        # === Resolve channels ===
         channels = await self._resolve_channels(request)
 
-        # --- Deliver ----------------------------------------------------
+        # === Deliver ===
         errors: list[str] = []
 
         if ChannelType.EMAIL in channels:
@@ -249,6 +232,7 @@ class NotificationRouter:
         if errors:
             raise RuntimeError(f"Delivery errors: {'; '.join(errors)}")
 
+    # === Channel resolution helpers ===
     async def _resolve_channels(self, request: NotificationRequest) -> list[ChannelType]:
         """
         Determine the target channel list.
@@ -277,8 +261,7 @@ class NotificationRouter:
 
         return channels or [ChannelType.EMAIL]  # Default to email if both disabled
 
-    # --- Contact detail helpers -----------------------------------------
-
+    # === Contact detail helpers ===
     def _get_email(self, request: NotificationRequest) -> str | None:
         """Extract email from the request payload (student or teacher)."""
         if request.student and request.student.email:

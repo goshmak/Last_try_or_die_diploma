@@ -9,9 +9,7 @@ from models import Base
 
 logger = logging.getLogger("notification_module.database")
 
-# ---------------------------------------------------------------------------
-# Engine
-# ---------------------------------------------------------------------------
+# === Engine ===
 # connect_args is only valid for SQLite; for PostgreSQL it is ignored.
 _connect_args = {}
 if settings.DATABASE_URL.startswith("sqlite"):
@@ -23,9 +21,7 @@ engine = create_async_engine(
     connect_args=_connect_args,
 )
 
-# ---------------------------------------------------------------------------
-# Session factory
-# ---------------------------------------------------------------------------
+# === Session factory ===
 AsyncSessionFactory = async_sessionmaker(
     bind=engine,
     class_=AsyncSession,
@@ -34,9 +30,7 @@ AsyncSessionFactory = async_sessionmaker(
 )
 
 
-# ---------------------------------------------------------------------------
-# Schema initialisation
-# ---------------------------------------------------------------------------
+# === Schema initialisation ===
 async def init_db() -> None:
     """Create all tables defined in models.py if they do not already exist."""
     async with engine.begin() as conn:
@@ -44,9 +38,7 @@ async def init_db() -> None:
     logger.info("Database schema initialised (engine: %s).", settings.DATABASE_URL.split("://")[0])
 
 
-# ---------------------------------------------------------------------------
-# Session context manager
-# ---------------------------------------------------------------------------
+# === Session context manager ===
 @asynccontextmanager
 async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
     """

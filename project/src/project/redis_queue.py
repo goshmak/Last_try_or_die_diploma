@@ -27,27 +27,16 @@ RETRY_QUEUE_KEY = f"{QUEUE_KEY}:retry"
 # ---------------------------------------------------------------------------
 # Producer helpers
 # ---------------------------------------------------------------------------
-async def enqueue_notification(task_id: str, payload: dict[str, Any]) -> None:
-    """
-    Push a notification task onto the Redis queue.
 
-    The envelope stored in Redis is:
-    {
-        "task_id": "<uuid>",
-        "attempt": 0,
-        "payload": { ... NotificationRequest fields ... }
-    }
-    """
+# === Push a notification task onto the Redis queue ===
+async def enqueue_notification(task_id: str, payload: dict[str, Any]) -> None:
     envelope = json.dumps({"task_id": task_id, "attempt": 0, "payload": payload})
     await redis_client.rpush(QUEUE_KEY, envelope)
     logger.debug("Enqueued task_id=%s to queue '%s'.", task_id, QUEUE_KEY)
 
-
+# === Re-enqueue a failed task with incremented attempt counter after a delay ===
+# If MAX_RETRY_ATTEMPTS is exceeded, mark the database record as FAILED.
 async def _requeue_with_backoff(envelope: dict[str, Any], error: str) -> None:
-    """
-    Re-enqueue a failed task with incremented attempt counter after a delay.
-    If MAX_RETRY_ATTEMPTS is exceeded, mark the database record as FAILED.
-    """
     from database import get_db_session
     from models import NotificationRecord, NotificationStatus
 
@@ -88,11 +77,10 @@ async def _requeue_with_backoff(envelope: dict[str, Any], error: str) -> None:
 # ---------------------------------------------------------------------------
 # Status helper (used by GET /notifications/status)
 # ---------------------------------------------------------------------------
+
+# Check whether a task_id exists in the Redis queue (still pending).
+# Returns None if not found in queue (may be processing or completed in DB).
 async def get_task_status(task_id: str) -> dict[str, Any] | None:
-    """
-    Check whether a task_id exists in the Redis queue (still pending).
-    Returns None if not found in queue (may be processing or completed in DB).
-    """
     # Scan the queue — O(n) but acceptable for a prototype
     items = await redis_client.lrange(QUEUE_KEY, 0, -1)
     for item in items:
@@ -105,11 +93,10 @@ async def get_task_status(task_id: str) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 # Worker
 # ---------------------------------------------------------------------------
+
+# Deserialise one queue item and delegate to the notification router.
+# Updates the database record on success or schedules a retry on failure.
 async def _process_envelope(raw: str) -> None:
-    """
-    Deserialise one queue item and delegate to the notification router.
-    Updates the database record on success or schedules a retry on failure.
-    """
     from database import get_db_session
     from models import NotificationRecord, NotificationRequest, NotificationStatus
     from send_notification import NotificationRouter
@@ -148,12 +135,9 @@ async def _process_envelope(raw: str) -> None:
         logger.exception("Task failed | task_id=%s | error=%s", task_id, exc)
         await _requeue_with_backoff(envelope, str(exc))
 
-
+# Single worker coroutine.
+# Blocks on BLPOP with a 5-second timeout so that it wakes up periodically and can be cancelled cleanly on shutdown.
 async def _worker_loop(worker_id: int) -> None:
-    """
-    Single worker coroutine. Blocks on BLPOP with a 5-second timeout so that
-    it wakes up periodically and can be cancelled cleanly on shutdown.
-    """
     logger.info("Worker %d started, listening on queue '%s'.", worker_id, QUEUE_KEY)
     while True:
         try:
@@ -170,14 +154,10 @@ async def _worker_loop(worker_id: int) -> None:
             logger.exception("Worker %d encountered unexpected error: %s", worker_id, exc)
             await asyncio.sleep(1)  # Brief pause before continuing
 
-
+# === Launch `concurrency` worker coroutines ===
+# Call this from a separate process or via `python worker.py`.
+# The workers run until cancelled (e.g. on SIGINT / SIGTERM).
 async def run_worker(concurrency: int | None = None) -> None:
-    """
-    Launch `concurrency` worker coroutines.
-
-    Call this from a separate process or via `python worker.py`.
-    The workers run until cancelled (e.g. on SIGINT / SIGTERM).
-    """
     n = concurrency or settings.WORKER_CONCURRENCY
     logger.info("Starting %d notification workers.", n)
     tasks = [asyncio.create_task(_worker_loop(i)) for i in range(n)]
