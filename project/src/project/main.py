@@ -1,325 +1,316 @@
-import asyncio
-import os
 import logging
-from uuid import UUID
-
-from dotenv import load_dotenv
+import uuid
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, BackgroundTasks, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from typing import Dict, Any, List
-from redis_queue.redis_queue import (
-    publish_notification,
-    start_redis_consumer,
-    stop_redis_consumer,
-    close_redis_connection,
-    get_queue_status,
+from datetime import datetime
+from typing import Optional
+
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import JSONResponse
+
+from database import init_db, get_db_session
+from models import (
+    NotificationRequest,
+    NotificationResponse,
+    NotificationHistoryItem,
+    SettingsUpdate,
+    SettingsResponse,
+    StatusResponse,
+    NotificationType,
+    NotificationStatus,
+    ChannelType,
+    NotificationRecord,
+    NotificationSettings,
 )
+from redis_queue import enqueue_notification, get_task_status, redis_client
+from send_notification import NotificationRouter
 
-# from files
-from background_processes import check_upcoming_deadlines
-from data_base import get_db_connection, init_database
-from models import NotificationType, UserPreference
-from logger import setup_global_logger
-from sends.send_vk_notification import close_vk_bot
-from sends.send_notification import send_notification
+# ---------------------------------------------------------------------------
+# Logging configuration
+# ---------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("logs/app.log", encoding="utf-8"),
+    ],
+)
+logger = logging.getLogger("notification_module.main")
 
 
-setup_global_logger(log_file_path="main_project.log")
-
-logger = logging.getLogger(__name__)
-load_dotenv()
-
-
+# ---------------------------------------------------------------------------
+# Lifespan manager: runs once on startup and shutdown
+# ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Запуск БД
-    init_database()
-    
-    # Запуск фоновой задачи проверки дедлайнов
-    deadline_task = asyncio.create_task(check_upcoming_deadlines())
-    
-    # Запуск Redis consumer
-    consumer_task = await start_redis_consumer(send_notification_wrapper)
-
-    logger.info("Notification service started with Redis queue")
-    logger.info("Service will receive requests via HTTP and process via Redis")
-
-    yield
-    
-    # Код завершения (Shutdown)
-    logger.info("Shutting down notification service...")
-    
-    deadline_task.cancel()
+    """
+    Startup: initialize PostgreSQL/SQLite schema and verify Redis connection.
+    Shutdown: close Redis connection pool.
+    """
+    logger.info("Starting up Notification Module...")
+    await init_db()
     try:
-        await deadline_task
-    except asyncio.CancelledError:
-        logger.info("Deadline checker task cancelled")
-    
-    # Остановка consumer и закрытие соединения
-    await stop_redis_consumer()
-    await close_redis_connection()
-    await close_vk_bot()
-    logger.info("Notification service shut down")
+        await redis_client.ping()
+        logger.info("Redis connection verified.")
+    except Exception as exc:
+        logger.error("Redis connection failed: %s", exc)
+    yield
+    logger.info("Shutting down Notification Module...")
+    await redis_client.aclose()
 
 
-# Передаем lifespan в параметр приложения
-app = FastAPI(title="Notification Service", lifespan=lifespan)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+# ---------------------------------------------------------------------------
+# FastAPI application
+# ---------------------------------------------------------------------------
+app = FastAPI(
+    title="Notification Module — ANO VO Humanitarian University",
+    description=(
+        "Automated notification microservice for the programming assignment "
+        "assessment system. Handles email and VK delivery with async queuing, "
+        "retry logic, and full audit history."
+    ),
+    version="1.0.0",
+    lifespan=lifespan,
 )
 
-async def send_notification_wrapper(message_data: Dict[str, Any]):
-    """Адаптер для вызова send_notification из сообщения"""
-    from sends.send_notification import send_notification
-    from models import NotificationType
-    from uuid import UUID
-    
-    await send_notification(
-        user_id=UUID(message_data["user_id"]),
-        user_type=message_data["user_type"],
-        notification_type=NotificationType(message_data["notification_type"]),
-        content_data=message_data["content_data"],
-        metadata=message_data.get("metadata"),
+
+# ---------------------------------------------------------------------------
+# Endpoint: POST /notifications/send
+# ---------------------------------------------------------------------------
+@app.post(
+    "/notifications/send",
+    response_model=NotificationResponse,
+    summary="Enqueue a notification for delivery",
+    tags=["Notifications"],
+)
+async def send_notification(payload: NotificationRequest) -> NotificationResponse:
+    """
+    Accept a notification request, persist it as PENDING, and enqueue it
+    for asynchronous processing. Returns immediately with a task_id.
+
+    The worker (redis_queue.py worker loop) picks up the task and calls
+    send_notification.py to route it to the correct channel(s).
+    """
+    task_id = str(uuid.uuid4())
+    logger.info(
+        "Received send request | task_id=%s | type=%s | recipient=%s",
+        task_id,
+        payload.notification_type,
+        payload.recipient_id,
     )
 
-# API эндпоинты
-@app.post("/api/notifications/send")
-async def send_notification_endpoint(
-    user_id: UUID,
-    user_type: str,
-    notification_type: NotificationType,
-    content_data: Dict[str, Any],
-    background_tasks: BackgroundTasks
-):
-    """
-    API для отправки уведомления.
-    Сообщение отправляется в Redis очередь для асинхронной обработки.
-    """
-    try:
-        # Отправляем в очередь Redis
-        success = await publish_notification(
-            user_id=user_id,
-            user_type=user_type,
-            notification_type=notification_type.value,
-            content_data=content_data,
-            metadata={"source": "api_gateway", "timestamp": None}
+    async with get_db_session() as session:
+        record = NotificationRecord(
+            task_id=task_id,
+            notification_type=payload.notification_type,
+            recipient_id=payload.recipient_id,
+            channel=payload.channel,
+            status=NotificationStatus.PENDING,
+            payload=payload.model_dump(mode="json"),
+            created_at=datetime.utcnow(),
         )
-        
-        if not success:
-            raise HTTPException(status_code=503, detail="Notification service unavailable")
-            
-        return {
-            "message": "Notification queued for sending",
-            "status": "queued",
-            "user_id": str(user_id),
-            "notification_type": notification_type.value
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error queuing notification: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        session.add(record)
+        await session.commit()
+
+    await enqueue_notification(task_id=task_id, payload=payload.model_dump(mode="json"))
+    logger.info("Notification enqueued | task_id=%s", task_id)
+
+    return NotificationResponse(
+        task_id=task_id,
+        status=NotificationStatus.PENDING,
+        message="Notification accepted and queued for delivery.",
+    )
 
 
-@app.post("/api/notifications/send/batch")
-async def send_batch_notifications_endpoint(
-    notifications: List[Dict[str, Any]]
-):
+# ---------------------------------------------------------------------------
+# Endpoint: GET /notifications/status/{task_id}
+# ---------------------------------------------------------------------------
+@app.get(
+    "/notifications/status/{task_id}",
+    response_model=StatusResponse,
+    summary="Check delivery status of a notification",
+    tags=["Notifications"],
+)
+async def get_status(task_id: str) -> StatusResponse:
     """
-    Массовая отправка уведомлений через очередь.
+    Return the current delivery status for a given task_id.
+    Status values: PENDING, PROCESSING, SENT, FAILED.
     """
-    results = []
-    
-    for notif in notifications:
-        try:
-            success = await publish_notification(
-                user_id=UUID(notif["user_id"]),
-                user_type=notif["user_type"],
-                notification_type=notif["notification_type"],
-                content_data=notif["content_data"],
-                metadata=notif.get("metadata")
-            )
-            
-            results.append({
-                "user_id": notif["user_id"],
-                "status": "queued" if success else "failed"
-            })
-            
-        except Exception as e:
-            logger.error(f"Error queuing batch notification: {e}")
-            results.append({
-                "user_id": notif["user_id"],
-                "status": "error",
-                "error": str(e)
-            })
-    
-    return {
-        "message": f"Processed {len(notifications)} notifications",
-        "results": results
-    }
+    async with get_db_session() as session:
+        record = await session.get(NotificationRecord, task_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Task not found.")
+
+    return StatusResponse(
+        task_id=task_id,
+        status=record.status,
+        channel=record.channel,
+        created_at=record.created_at,
+        sent_at=record.sent_at,
+        error_message=record.error_message,
+        attempt_count=record.attempt_count,
+    )
 
 
-@app.get("/api/notifications/queue/status")
-async def get_queue_status_endpoint():
-    """Проверка статуса очереди"""
-    return await get_queue_status()
+# ---------------------------------------------------------------------------
+# Endpoint: GET /notifications/history
+# ---------------------------------------------------------------------------
+@app.get(
+    "/notifications/history",
+    response_model=list[NotificationHistoryItem],
+    summary="Retrieve notification history with optional filters",
+    tags=["Notifications"],
+)
+async def get_history(
+    recipient_id: Optional[str] = Query(None, description="Filter by recipient ID"),
+    notification_type: Optional[NotificationType] = Query(None, description="Filter by type"),
+    status: Optional[NotificationStatus] = Query(None, description="Filter by status"),
+    limit: int = Query(50, ge=1, le=500, description="Maximum records to return"),
+    offset: int = Query(0, ge=0, description="Pagination offset"),
+) -> list[NotificationHistoryItem]:
+    """
+    Retrieve notification history. Supports filtering by recipient, type, and
+    delivery status. Paginated with limit/offset.
+    """
+    from sqlalchemy import select
 
+    async with get_db_session() as session:
+        stmt = select(NotificationRecord)
+        if recipient_id:
+            stmt = stmt.where(NotificationRecord.recipient_id == recipient_id)
+        if notification_type:
+            stmt = stmt.where(NotificationRecord.notification_type == notification_type)
+        if status:
+            stmt = stmt.where(NotificationRecord.status == status)
+        stmt = stmt.order_by(NotificationRecord.created_at.desc()).limit(limit).offset(offset)
 
-@app.post("/api/notifications/preferences")
-async def update_notification_preferences(preferences: UserPreference):
-    """Обновление настроек уведомлений пользователя"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
+        result = await session.execute(stmt)
+        records = result.scalars().all()
 
-    try:
-        cursor.execute(
-            """
-            INSERT INTO user_notification_preferences 
-            (user_id, user_type, email, vk_id, notification_channel,
-             new_assignment_enabled, deadline_student_enabled, 
-             deadline_teacher_enabled, assignment_checked_enabled,
-             updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-            ON CONFLICT (user_id) DO UPDATE SET
-                user_type = EXCLUDED.user_type,
-                email = EXCLUDED.email,
-                vk_id = EXCLUDED.vk_id,
-                notification_channel = EXCLUDED.notification_channel,
-                new_assignment_enabled = EXCLUDED.new_assignment_enabled,
-                deadline_student_enabled = EXCLUDED.deadline_student_enabled,
-                deadline_teacher_enabled = EXCLUDED.deadline_teacher_enabled,
-                assignment_checked_enabled = EXCLUDED.assignment_checked_enabled,
-                updated_at = CURRENT_TIMESTAMP
-            """,
-            (
-                str(preferences.user_id),
-                preferences.user_type,
-                preferences.email,
-                preferences.vk_id,
-                preferences.notification_channel.value,
-                preferences.notifications_enabled.get("new_assignment", True),
-                preferences.notifications_enabled.get("deadline_student", True),
-                preferences.notifications_enabled.get("deadline_teacher", True),
-                preferences.notifications_enabled.get("assignment_checked", True),
-            ),
+    return [
+        NotificationHistoryItem(
+            task_id=r.task_id,
+            notification_type=r.notification_type,
+            recipient_id=r.recipient_id,
+            channel=r.channel,
+            status=r.status,
+            created_at=r.created_at,
+            sent_at=r.sent_at,
+            attempt_count=r.attempt_count,
         )
-
-        conn.commit()
-        return {"message": "Preferences updated successfully"}
-    except Exception as e:
-        logger.error(f"Error updating preferences: {e}")
-        conn.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        cursor.close()
-        conn.close()
+        for r in records
+    ]
 
 
-@app.get("/api/notifications/history/{user_id}")
-async def get_notification_history(user_id: UUID, limit: int = 50):
-    """Получение истории уведомлений пользователя"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
+# ---------------------------------------------------------------------------
+# Endpoint: GET /notifications/settings/{recipient_id}
+# ---------------------------------------------------------------------------
+@app.get(
+    "/notifications/settings/{recipient_id}",
+    response_model=SettingsResponse,
+    summary="Retrieve notification preferences for a user",
+    tags=["Settings"],
+)
+async def get_settings(recipient_id: str) -> SettingsResponse:
+    """
+    Return the channel preferences stored for a given user.
+    If no settings exist, returns defaults (both channels enabled).
+    """
+    from sqlalchemy import select
 
-    try:
-        cursor.execute(
-            """
-            SELECT notification_id, user_id, user_type, notification_type, 
-                   title, content, channel, status, created_at, sent_at
-            FROM notifications 
-            WHERE user_id = %s 
-            ORDER BY created_at DESC 
-            LIMIT %s
-            """,
-            (str(user_id), limit),
+    async with get_db_session() as session:
+        stmt = select(NotificationSettings).where(
+            NotificationSettings.recipient_id == recipient_id
+        )
+        result = await session.execute(stmt)
+        settings = result.scalar_one_or_none()
+
+    if not settings:
+        return SettingsResponse(
+            recipient_id=recipient_id,
+            email_enabled=True,
+            vk_enabled=True,
+            email_address=None,
+            vk_user_id=None,
         )
 
-        notifications = cursor.fetchall()
-        
-        # Преобразуем UUID для JSON сериализации
-        for notif in notifications:
-            notif["user_id"] = str(notif["user_id"])
-        
-        return {"notifications": notifications, "total": len(notifications)}
-    except Exception as e:
-        logger.error(f"Error getting notification history: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        cursor.close()
-        conn.close()
+    return SettingsResponse(
+        recipient_id=recipient_id,
+        email_enabled=settings.email_enabled,
+        vk_enabled=settings.vk_enabled,
+        email_address=settings.email_address,
+        vk_user_id=settings.vk_user_id,
+    )
 
 
-@app.get("/api/notifications/stats")
-async def get_notification_stats():
-    """Статистика по уведомлениям"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
+# ---------------------------------------------------------------------------
+# Endpoint: PUT /notifications/settings/{recipient_id}
+# ---------------------------------------------------------------------------
+@app.put(
+    "/notifications/settings/{recipient_id}",
+    response_model=SettingsResponse,
+    summary="Update notification preferences for a user",
+    tags=["Settings"],
+)
+async def update_settings(recipient_id: str, payload: SettingsUpdate) -> SettingsResponse:
+    """
+    Create or update channel preferences for a user. Allows enabling/disabling
+    email and VK independently and updating contact details.
+    """
+    from sqlalchemy import select
 
-    try:
-        cursor.execute("""
-            SELECT 
-                notification_type,
-                channel,
-                status,
-                COUNT(*) as count,
-                DATE(created_at) as date
-            FROM notifications
-            WHERE created_at >= NOW() - INTERVAL '30 days'
-            GROUP BY notification_type, channel, status, DATE(created_at)
-            ORDER BY date DESC
-        """)
+    async with get_db_session() as session:
+        stmt = select(NotificationSettings).where(
+            NotificationSettings.recipient_id == recipient_id
+        )
+        result = await session.execute(stmt)
+        settings = result.scalar_one_or_none()
 
-        stats = cursor.fetchall()
-        return {"stats": stats, "period": "last_30_days"}
-    except Exception as e:
-        logger.error(f"Error getting stats: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        cursor.close()
-        conn.close()
+        if not settings:
+            settings = NotificationSettings(recipient_id=recipient_id)
+            session.add(settings)
+
+        if payload.email_enabled is not None:
+            settings.email_enabled = payload.email_enabled
+        if payload.vk_enabled is not None:
+            settings.vk_enabled = payload.vk_enabled
+        if payload.email_address is not None:
+            settings.email_address = payload.email_address
+        if payload.vk_user_id is not None:
+            settings.vk_user_id = payload.vk_user_id
+
+        await session.commit()
+        await session.refresh(settings)
+
+    logger.info("Settings updated for recipient_id=%s", recipient_id)
+    return SettingsResponse(
+        recipient_id=recipient_id,
+        email_enabled=settings.email_enabled,
+        vk_enabled=settings.vk_enabled,
+        email_address=settings.email_address,
+        vk_user_id=settings.vk_user_id,
+    )
 
 
-@app.get("/health")
+# ---------------------------------------------------------------------------
+# Endpoint: GET /health
+# ---------------------------------------------------------------------------
+@app.get("/health", summary="Health check", tags=["System"])
 async def health_check():
-    """Проверка здоровья сервиса"""
-    # Проверка подключения к БД
+    """
+    Lightweight liveness probe. Checks Redis reachability.
+    Returns 200 if the service is operational.
+    """
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT 1")
-        cursor.close()
-        conn.close()
-        db_status = "connected"
-    except Exception as e:
-        logger.error(f"Database health check failed: {e}")
-        db_status = "disconnected"
-    
-    # Проверка Redis
-    redis_status = "unknown"
-    try:
-        from redis_queue.redis_queue import get_redis_connection
-        redis_client = await get_redis_connection()
         await redis_client.ping()
-        redis_status = "connected"
-    except Exception as e:
-        logger.error(f"Redis health check failed: {e}")
-        redis_status = "disconnected"
-    
-    return {
-        "status": "healthy" if db_status == "connected" and redis_status == "connected" else "degraded",
-        "service": "notification_service",
-        "database": db_status,
-        "redis": redis_status
-    }
+        redis_ok = True
+    except Exception:
+        redis_ok = False
 
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8002)
+    return JSONResponse(
+        content={
+            "status": "ok" if redis_ok else "degraded",
+            "redis": "connected" if redis_ok else "unreachable",
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+    )
