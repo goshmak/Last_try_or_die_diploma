@@ -1,0 +1,32 @@
+1. Запустите Notification Service (на порту 8002):
+python main.py
+
+2. В другом терминале запустите Fake API Gateway (на порту 8001):
+python fake_api_gateway.py
+
+3. В третьем терминале запустите тесты:
+chmod +x test_api.sh
+./test_api.sh
+
+Optional 
+Используйте curl для ручного тестирования:
+# Создать задание
+curl -X POST http://localhost:8001/api/assignments/create \
+  -H "Content-Type: application/json" \
+  -d '{
+    "assignment_id": 200,
+    "assignment_number": "КР-001",
+    "assignment_description": "Контрольная работа по теме 'Основы Python'",
+    "deadline": "2024-12-15 23:59:59",
+    "subject_name": "Программирование",
+    "group_name": "Группа А-101"
+  }'
+
+# Отправить тестовое уведомление всем
+curl -X POST http://localhost:8001/api/test/send-to-all
+
+# Проверить здоровье
+curl http://localhost:8001/api/test/health
+
+# Получить историю уведомлений студента
+curl http://localhost:8001/api/notifications/history/1
