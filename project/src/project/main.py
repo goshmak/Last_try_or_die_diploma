@@ -39,7 +39,7 @@ logger = logging.getLogger("notification_module.main")
 
 
 # ---------------------------------------------------------------------------
-# Lifespan manager: runs once on startup and shutdown
+# Lifespan manager
 # ---------------------------------------------------------------------------
 
 # Startup: initialize PostgreSQL/SQLite schema and verify Redis connection.

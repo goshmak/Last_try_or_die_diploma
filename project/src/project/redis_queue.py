@@ -154,8 +154,8 @@ async def _worker_loop(worker_id: int) -> None:
             logger.exception("Worker %d encountered unexpected error: %s", worker_id, exc)
             await asyncio.sleep(1)  # Brief pause before continuing
 
-# === Launch `concurrency` worker coroutines ===
-# Call this from a separate process or via `python worker.py`.
+# === Launch concurrency worker coroutines ===
+# Call this from a separate process or via python worker.py.
 # The workers run until cancelled (e.g. on SIGINT / SIGTERM).
 async def run_worker(concurrency: int | None = None) -> None:
     n = concurrency or settings.WORKER_CONCURRENCY

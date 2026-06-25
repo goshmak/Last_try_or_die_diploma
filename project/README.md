@@ -15,7 +15,7 @@
 8. Verifying Functionality via Swagger
 9. Test Notification Payloads
 10. Database Notes
-11. Troubleshooting
+
 
 ---
 

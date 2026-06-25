@@ -57,3 +57,7 @@
 2026-06-18 10:18:16,189 | INFO | notification_module.main | Notification enqueued | task_id=1b737bb0-8563-4fdb-bec5-5094bb9b4526
 2026-06-18 10:20:40,124 | INFO | notification_module.main | Received send request | task_id=ffac2bcb-b20a-4b5d-a6bb-7e1e67bf3d59 | type=review_result | recipient=teacher-001
 2026-06-18 10:20:40,289 | INFO | notification_module.main | Notification enqueued | task_id=ffac2bcb-b20a-4b5d-a6bb-7e1e67bf3d59
+2026-06-19 17:37:17,671 | INFO | notification_module.main | Starting up Notification Module...
+2026-06-19 17:37:17,720 | INFO | notification_module.database | Database schema initialised (engine: sqlite+aiosqlite).
+2026-06-19 17:37:17,817 | INFO | notification_module.main | Redis connection verified.
+2026-06-19 17:42:25,880 | INFO | notification_module.main | Shutting down Notification Module...
