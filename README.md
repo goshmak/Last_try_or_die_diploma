@@ -173,11 +173,9 @@ uvicorn main:app --host 0.0.0.0 --port 8001 --reload
 
 API будет доступен по адресам:
 
-    Swagger UI: http://localhost:8001/docs
-
-    ReDoc: http://localhost:8001/redoc
-
-    Health: http://localhost:8001/health
+Swagger UI: http://localhost:8001/docs
+ReDoc: http://localhost:8001/redoc
+Health: http://localhost:8001/health
 
 7. Запуск воркера
 
